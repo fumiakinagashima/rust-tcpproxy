@@ -1,49 +1,63 @@
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::health::Backends;
 
 use super::LoadBalancer;
 
-struct WeightedBackend {
-    addr: SocketAddr,
+struct WeightedState {
     weight: i32,
     current_weight: i32,
 }
 
 pub struct Weighted {
-    backends: Mutex<Vec<WeightedBackend>>,
-    total_weight: i32,
+    backends: Arc<Backends>,
+    state: Mutex<Vec<WeightedState>>,
 }
 
 impl Weighted {
-    pub fn new(backends: Vec<(SocketAddr, i32)>) -> Self {
-        let total_weight = backends.iter().map(|(_, weight)| weight).sum();
-        let backends = backends
+    pub fn new(backends: Arc<Backends>, weights: Vec<i32>) -> Self {
+        assert_eq!(backends.addrs().len(), weights.len());
+        let state = weights
             .into_iter()
-            .map(|(addr, weight)| WeightedBackend {
-                addr,
+            .map(|weight| WeightedState {
                 weight,
                 current_weight: 0,
             })
             .collect();
         Self {
-            backends: Mutex::new(backends),
-            total_weight,
+            backends,
+            state: Mutex::new(state),
         }
     }
 }
 
 impl LoadBalancer for Weighted {
-    fn next_backend(&self) -> SocketAddr {
-        let mut backends = self.backends.lock().unwrap();
-        for b in backends.iter_mut() {
-            b.current_weight += b.weight;
+    fn next_backend(&self) -> Option<SocketAddr> {
+        let mut state = self.state.lock().unwrap();
+        let total_weight: i32 = state
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.backends.is_healthy(*idx))
+            .map(|(_, s)| s.weight)
+            .sum();
+        if total_weight == 0 {
+            return None;
         }
-        let selected = backends
+
+        for (idx, s) in state.iter_mut().enumerate() {
+            if self.backends.is_healthy(idx) {
+                s.current_weight += s.weight;
+            }
+        }
+
+        let (idx, selected) = state
             .iter_mut()
-            .max_by_key(|b| b.current_weight)
-            .unwrap();
-        selected.current_weight -= self.total_weight;
-        selected.addr
+            .enumerate()
+            .filter(|(idx, _)| self.backends.is_healthy(*idx))
+            .max_by_key(|(_, s)| s.current_weight)?;
+        selected.current_weight -= total_weight;
+        Some(self.backends.addrs()[idx])        
     }
 }
 

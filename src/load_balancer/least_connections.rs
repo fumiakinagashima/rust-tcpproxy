@@ -1,35 +1,38 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use crate::health::Backends;
 
 use super::LoadBalancer;
 
 pub struct LeastConnections {
-    backends: Vec<SocketAddr>,
+    backends: Arc<Backends>,
     active: Vec<AtomicUsize>,
 }
 
 impl LeastConnections {
-    pub fn new(backends: Vec<SocketAddr>) -> Self {
-        let active = backends.iter().map(|_| AtomicUsize::new(0)).collect();
+    pub fn new(backends: Arc<Backends>) -> Self {
+        let active = backends.addrs().iter().map(|_| AtomicUsize::new(0)).collect();
         Self { backends, active }
     }
 }
 
 impl LoadBalancer for LeastConnections {
-    fn next_backend(&self) -> SocketAddr {
+    fn next_backend(&self) -> Option<SocketAddr> {
         let idx = self
             .active
             .iter()
             .enumerate()
+            .filter(|(idx, _)| self.backends.is_healthy(*idx))
             .min_by_key(|(_, count)| count.load(Ordering::Relaxed))
-            .map(|(idx, _)| idx)
-            .unwrap();
+            .map(|(idx, _)| idx)?;
         self.active[idx].fetch_add(1, Ordering::Relaxed);
-        self.backends[idx]
+        Some(self.backends.addrs()[idx])
     }
 
     fn release(&self, backend_addr: SocketAddr) {
-        if let Some(idx) = self.backends.iter().position(|&b| b == backend_addr) {
+        if let Some(idx) = self.backends.addrs().iter().position(|&b| b == backend_addr) {
             self.active[idx].fetch_sub(1, Ordering::Relaxed);
         }
     }

@@ -11,6 +11,6 @@ pub use weighted::Weighted;
 use std::net::SocketAddr;
 
 pub trait LoadBalancer: Send + Sync {
-    fn next_backend(&self) -> SocketAddr;
+    fn next_backend(&self) -> Option<SocketAddr>;
     fn release(&self, _backend_addr: SocketAddr) {}
 }

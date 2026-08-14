@@ -1,22 +1,31 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use rand::RngExt;
+
+use crate::health::Backends;
 
 use super::LoadBalancer;
 
 pub struct Random {
-    backends: Vec<SocketAddr>,
+    backends: Arc<Backends>,
 }
 
 impl Random {
-    pub fn new(backends: Vec<SocketAddr>) -> Self {
+    pub fn new(backends: Arc<Backends>) -> Self {
         Self { backends }
     }
 }
 
 impl LoadBalancer for Random {
-    fn next_backend(&self) -> SocketAddr {
-        let idx = rand::rng().random_range(0..self.backends.len());
-        self.backends[idx]
+    fn next_backend(&self) -> Option<SocketAddr> {
+        let healthy_indices: Vec<usize> = (0..self.backends.addrs().len())
+            .filter(|&idx| self.backends.is_healthy(idx))
+            .collect();
+        if healthy_indices.is_empty() {
+            return None;
+        }
+        let pick = rand::rng().random_range(0..healthy_indices.len());
+        Some(self.backends.addrs()[healthy_indices[pick]]) 
     }
 }
 
