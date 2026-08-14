@@ -1,28 +1,32 @@
-use std::net::SocketAddr;
-use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream};
+mod load_balancer;
+mod proxy;
+
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use load_balancer::{LoadBalancer, Weighted};
+use proxy::handle_connection;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8000";
-const BACKEND_ADDR: &str = "127.0.0.1:9000";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let backends = vec![
+        ("127.0.0.1:9001".parse().unwrap(), 5),
+        ("127.0.0.1:9002".parse().unwrap(), 1),
+        ("127.0.0.1:9003".parse().unwrap(), 1),
+    ];
+    let lb: Arc<dyn LoadBalancer> = Arc::new(Weighted::new(backends));
+
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
-    println!("listening on {LISTEN_ADDR}, forwarding to {BACKEND_ADDR}");
+    println!("listening on {LISTEN_ADDR}");
+
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
+        let lb = Arc::clone(&lb);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(inbound, peer_addr).await {
+            if let Err(e) = handle_connection(inbound, peer_addr, lb).await {
                 eprintln!("connection error ({peer_addr}): {e}");
             }
         });
     }
-}
-
-async fn handle_connection(mut inbound: TcpStream, peer_addr: SocketAddr) -> std::io::Result<()> {
-    let mut outbound = TcpStream::connect(BACKEND_ADDR).await?;
-    let (from_client, from_backend) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-    println!("{peer_addr}: {from_backend} bytes client->backend, {from_backend} bytes backend->client");
-    
-    Ok({})
 }
