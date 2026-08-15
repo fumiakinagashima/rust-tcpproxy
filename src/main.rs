@@ -21,6 +21,7 @@ const FAILURE_THRESHOLD: usize = 3;
 const POOL_TARGET_SIZE: usize = 4;
 const POOL_REFILL_INTERVAL: Duration = Duration::from_millis(200);
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONNECTION_ATTEMPTS: usize = 3;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -69,7 +70,8 @@ async fn main() -> std::io::Result<()> {
                         lb,
                         backends,
                         pools,
-                        FAILURE_THRESHOLD
+                        FAILURE_THRESHOLD,
+                        MAX_CONNECTION_ATTEMPTS
                     ).await {
                         eprintln!("connection error ({peer_addr}): {e}");
                     }
