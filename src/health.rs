@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -7,12 +7,14 @@ use tokio::net::TcpStream;
 pub struct Backends {
     addrs: Vec<SocketAddr>,
     healthy: Vec<AtomicBool>,
+    consecutive_failures: Vec<AtomicUsize>,
 }
 
 impl Backends {
     pub fn new(addrs: Vec<SocketAddr>) -> Self {
         let healthy = addrs.iter().map(|_| AtomicBool::new(true)).collect();
-        Self { addrs, healthy }
+        let consecutive_failures = addrs.iter().map(|_| AtomicUsize::new(0)).collect();
+        Self { addrs, healthy, consecutive_failures }
     }
 
     pub fn addrs(&self) -> &[SocketAddr] {
@@ -21,6 +23,21 @@ impl Backends {
 
     pub fn is_healthy(&self, idx: usize) -> bool {
         self.healthy[idx].load(Ordering::Relaxed)
+    }
+
+    pub fn record_success(&self, idx: usize) {
+        self.consecutive_failures[idx].store(0, Ordering::Relaxed);
+    }
+
+    pub fn record_failure(&self, idx: usize, threshold: usize) {
+        let failures = self.consecutive_failures[idx].fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= threshold {
+            self.set_healthy(idx, false);
+        }
+    }
+
+    pub fn index_of(&self, addr: SocketAddr) -> Option<usize> {
+        self.addrs.iter().position(|&a| a == addr)
     }
 
     fn set_healthy(&self, idx: usize, healthy: bool) {

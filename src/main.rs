@@ -11,8 +11,9 @@ use load_balancer::{LoadBalancer, RoundRobin};
 use proxy::handle_connection;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8000";
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+const FAILURE_THRESHOLD: usize = 3;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -37,8 +38,15 @@ async fn main() -> std::io::Result<()> {
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
         let lb = Arc::clone(&lb);
+        let backends = Arc::clone(&backends);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(inbound, peer_addr, lb).await {
+            if let Err(e) = handle_connection(
+                inbound,
+                peer_addr,
+                lb,
+                backends,
+                FAILURE_THRESHOLD
+            ).await {
                 eprintln!("connection error ({peer_addr}): {e}");
             }
         });
