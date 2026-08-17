@@ -2,12 +2,14 @@ mod health;
 mod load_balancer;
 mod pool;
 mod proxy;
+mod rate_limit;
 
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinSet;
+use rate_limit::{ConnectionLimiter, IpRateLimiter};
 
 use health::{run_health_checks, Backends};
 use load_balancer::{LoadBalancer, RoundRobin};
@@ -22,6 +24,9 @@ const POOL_TARGET_SIZE: usize = 4;
 const POOL_REFILL_INTERVAL: Duration = Duration::from_millis(200);
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECTION_ATTEMPTS: usize = 3;
+const MAX_CONCURRENT_CONNECTIONS: usize = 100;
+const IP_RATE_LIMIT_BURST: f64 = 20.0;
+const IP_RATE_LIMIT_PER_SEC: f64 = 5.0;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -48,7 +53,8 @@ async fn main() -> std::io::Result<()> {
     }
 
     let lb: Arc<dyn LoadBalancer> = Arc::new(RoundRobin::new(Arc::clone(&backends)));
-
+    let limiter = Arc::new(ConnectionLimiter::new(MAX_CONCURRENT_CONNECTIONS));
+    let ip_limiter = Arc::new(IpRateLimiter::new(IP_RATE_LIMIT_BURST, IP_RATE_LIMIT_PER_SEC));
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
     println!("listening on {LISTEN_ADDR}");
 
@@ -60,10 +66,19 @@ async fn main() -> std::io::Result<()> {
         tokio::select! {
             accepted = listener.accept() => {
                 let (inbound, peer_addr) = accepted?;
+                if !ip_limiter.allow(peer_addr.ip()) {
+                    eprintln!("rejecting {peer_addr}: ip rate limit exceeded");
+                    continue;
+                }
+                let Some(permit) = limiter.try_acquire() else {
+                    eprintln!("rejecting {peer_addr}: connection limit reached");
+                    continue;
+                };
                 let lb = Arc::clone(&lb);
                 let backends = Arc::clone(&backends);
                 let pools = Arc::clone(&pools);
                 tasks.spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_connection(
                         inbound,
                         peer_addr,
