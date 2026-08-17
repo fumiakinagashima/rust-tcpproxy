@@ -1,6 +1,7 @@
 mod health;
 mod load_balancer;
 mod pool;
+mod proxy_protocol;
 mod proxy;
 mod rate_limit;
 

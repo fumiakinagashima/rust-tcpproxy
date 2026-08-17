@@ -1,11 +1,13 @@
+use crate::health::Backends;
+use crate::load_balancer::LoadBalancer;
+use crate::pool::Pool;
+use crate::proxy_protocol::v2_header;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
-
-use crate::health::Backends;
-use crate::load_balancer::LoadBalancer;
-use crate::pool::Pool;
+use tokio::io::AsyncWriteExt;
 
 pub async fn handle_connection(
     mut inbound: TcpStream,
@@ -45,6 +47,10 @@ pub async fn handle_connection(
                 }
             }
         };
+
+        let local_addr = outbound.local_addr()?;
+        let header = v2_header(peer_addr, local_addr);
+        outbound.write_all(&header).await?;
 
         let result = copy_bidirectional(&mut inbound, &mut outbound).await;
         lb.release(backend_addr);
