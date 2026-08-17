@@ -4,6 +4,7 @@ mod pool;
 mod proxy_protocol;
 mod proxy;
 mod rate_limit;
+mod tls_sni;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +17,8 @@ use health::{run_health_checks, Backends};
 use load_balancer::{LoadBalancer, RoundRobin};
 use pool::{new_pools, run_pool_filler};
 use proxy::handle_connection;
+use tls_sni::build_sni_routes;
+use std::collections::HashMap;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8000";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
@@ -28,6 +31,7 @@ const MAX_CONNECTION_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_CONNECTIONS: usize = 100;
 const IP_RATE_LIMIT_BURST: f64 = 20.0;
 const IP_RATE_LIMIT_PER_SEC: f64 = 5.0;
+const SNI_PEEK_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -54,6 +58,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     let lb: Arc<dyn LoadBalancer> = Arc::new(RoundRobin::new(Arc::clone(&backends)));
+    let sni_routes = Arc::new(build_sni_routes());
     let limiter = Arc::new(ConnectionLimiter::new(MAX_CONCURRENT_CONNECTIONS));
     let ip_limiter = Arc::new(IpRateLimiter::new(IP_RATE_LIMIT_BURST, IP_RATE_LIMIT_PER_SEC));
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
@@ -78,6 +83,7 @@ async fn main() -> std::io::Result<()> {
                 let lb = Arc::clone(&lb);
                 let backends = Arc::clone(&backends);
                 let pools = Arc::clone(&pools);
+                let sni_routes = Arc::clone(&sni_routes);
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(e) = handle_connection(
@@ -86,6 +92,8 @@ async fn main() -> std::io::Result<()> {
                         lb,
                         backends,
                         pools,
+                        sni_routes,
+                        SNI_PEEK_TIMEOUT,
                         FAILURE_THRESHOLD,
                         MAX_CONNECTION_ATTEMPTS
                     ).await {

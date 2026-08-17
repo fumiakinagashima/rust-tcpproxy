@@ -2,12 +2,15 @@ use crate::health::Backends;
 use crate::load_balancer::LoadBalancer;
 use crate::pool::Pool;
 use crate::proxy_protocol::v2_header;
+use crate::tls_sni::peek_sni;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
+use std::collections::HashMap;
 
 pub async fn handle_connection(
     mut inbound: TcpStream,
@@ -15,16 +18,25 @@ pub async fn handle_connection(
     lb: Arc<dyn LoadBalancer>,
     backends: Arc<Backends>,
     pools: Arc<Vec<Arc<Pool>>>,
+    sni_routes: Arc<HashMap<String, SocketAddr>>,
+    sni_peek_timeout: Duration,
     failure_threshold: usize,
     max_connection_attempts: usize,
 ) -> std::io::Result<()> {
+    let sni_backend = peek_sni(&inbound, sni_peek_timeout)
+        .await
+        .and_then(|name| sni_routes.get(&name).copied());
     let mut last_err = std::io::Error::other("no healthy backend available");
 
     for _ in 0..max_connection_attempts {
-        let Some(backend_addr) = lb.next_backend() else {
-            return Err(last_err);
+        let backend_addr = match sni_backend {
+            Some(addr) => addr,
+            None => match lb.next_backend() {
+                Some(addr) => addr,
+                None => return Err(last_err),
+            },
         };
-
+        
         let idx = backends.index_of(backend_addr);
 
         let mut outbound = if let Some(stream) = idx.and_then(|idx| pools[idx].try_get()) {
@@ -41,7 +53,9 @@ pub async fn handle_connection(
                     if let Some(idx) = idx {
                         backends.record_failure(idx, failure_threshold);
                     }
-                    lb.release(backend_addr);
+                    if sni_backend.is_none() {
+                        lb.release(backend_addr);
+                    }
                     last_err = e;
                     continue;
                 }
@@ -53,8 +67,10 @@ pub async fn handle_connection(
         outbound.write_all(&header).await?;
 
         let result = copy_bidirectional(&mut inbound, &mut outbound).await;
-        lb.release(backend_addr);
-
+        if sni_backend.is_none() {
+            lb.release(backend_addr);
+        }
+        
         let (from_client, from_backend) = result?;
         println!(
             "{peer_addr} -> {backend_addr}: {from_client} bytes client->backend, {from_backend} bytes backend->client"
