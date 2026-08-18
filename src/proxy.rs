@@ -4,6 +4,7 @@ use crate::pool::Pool;
 use crate::proxy_protocol::v2_header;
 use crate::tls_sni::peek_sni;
 use crate::metrics::{Direction, Metrics};
+use crate::fault_injection::FaultInjector;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub async fn handle_connection(
     failure_threshold: usize,
     max_connection_attempts: usize,
     metrics: Arc<Metrics>,
+    fault_injector: Arc<FaultInjector>,
 ) -> std::io::Result<()> {
     let _active = metrics.track_connection();
     let sni_backend = peek_sni(&inbound, sni_peek_timeout)
@@ -67,6 +69,21 @@ pub async fn handle_connection(
         };
 
         let local_addr = outbound.local_addr()?;
+
+        fault_injector.maybe_delay().await;
+        if fault_injector.should_disconnect() {
+            drop(outbound);
+            if let Some(idx) = idx {
+                backends.record_failure(idx, failure_threshold);
+                metrics.inc_backend_failure(idx);
+            }
+            if sni_backend.is_none() {
+                lb.release(backend_addr);
+            }
+            last_err = std::io::Error::other("fault injection: forcced disconnect");
+            continue;
+        }
+        
         let header = v2_header(peer_addr, local_addr);
         outbound.write_all(&header).await?;
 

@@ -7,6 +7,7 @@ mod rate_limit;
 mod tls_sni;
 mod metrics;
 mod metrics_server;
+mod fault_injection;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use tokio::task::JoinSet;
 use rate_limit::{ConnectionLimiter, IpRateLimiter};
 use metrics::{Metrics, RejectReason};
 use metrics_server::run_metrics_server;
+use fault_injection::FaultInjector;
 
 use health::{run_health_checks, Backends};
 use load_balancer::{LoadBalancer, RoundRobin};
@@ -37,6 +39,9 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 100;
 const IP_RATE_LIMIT_BURST: f64 = 20.0;
 const IP_RATE_LIMIT_PER_SEC: f64 = 5.0;
 const SNI_PEEK_TIMEOUT: Duration = Duration::from_millis(200);
+const FAULT_DELAY_PROBABILITY: f64 = 0.0;
+const FAULT_DELAY_DURATION: Duration = Duration::from_millis(500);
+const FAULT_DISCONNECT_PROBABILITY: f64 = 0.0;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -74,6 +79,11 @@ async fn main() -> std::io::Result<()> {
     let sni_routes = Arc::new(build_sni_routes());
     let limiter = Arc::new(ConnectionLimiter::new(MAX_CONCURRENT_CONNECTIONS));
     let ip_limiter = Arc::new(IpRateLimiter::new(IP_RATE_LIMIT_BURST, IP_RATE_LIMIT_PER_SEC));
+    let fault_injector = Arc::new(FaultInjector::new(
+        FAULT_DELAY_PROBABILITY,
+        FAULT_DELAY_DURATION,
+        FAULT_DISCONNECT_PROBABILITY,
+    ));
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
     println!("listening on {LISTEN_ADDR}");
 
@@ -100,6 +110,7 @@ async fn main() -> std::io::Result<()> {
                 let pools = Arc::clone(&pools);
                 let sni_routes = Arc::clone(&sni_routes);
                 let metrics = Arc::clone(&metrics);
+                let fault_injector = Arc::clone(&fault_injector);
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(e) = handle_connection(
@@ -113,6 +124,7 @@ async fn main() -> std::io::Result<()> {
                         FAILURE_THRESHOLD,
                         MAX_CONNECTION_ATTEMPTS,
                         metrics,
+                        fault_injector,
                     ).await {
                         eprintln!("connection error ({peer_addr}): {e}");
                     }
