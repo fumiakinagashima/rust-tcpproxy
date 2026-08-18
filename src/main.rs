@@ -5,6 +5,8 @@ mod proxy_protocol;
 mod proxy;
 mod rate_limit;
 mod tls_sni;
+mod metrics;
+mod metrics_server;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +14,8 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinSet;
 use rate_limit::{ConnectionLimiter, IpRateLimiter};
+use metrics::{Metrics, RejectReason};
+use metrics_server::run_metrics_server;
 
 use health::{run_health_checks, Backends};
 use load_balancer::{LoadBalancer, RoundRobin};
@@ -21,6 +25,7 @@ use tls_sni::build_sni_routes;
 use std::collections::HashMap;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8000";
+const METRICS_LISTEN_ADDR: &str = "127.0.0.1:9100";
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 const FAILURE_THRESHOLD: usize = 3;
@@ -57,6 +62,14 @@ async fn main() -> std::io::Result<()> {
         ));
     }
 
+    let metrics = Arc::new(Metrics::new(backends.addrs().to_vec()));
+    tokio::spawn(run_metrics_server(
+        METRICS_LISTEN_ADDR,
+        Arc::clone(&metrics),
+        Arc::clone(&backends),
+        Arc::clone(&pools),
+    ));
+
     let lb: Arc<dyn LoadBalancer> = Arc::new(RoundRobin::new(Arc::clone(&backends)));
     let sni_routes = Arc::new(build_sni_routes());
     let limiter = Arc::new(ConnectionLimiter::new(MAX_CONCURRENT_CONNECTIONS));
@@ -74,16 +87,19 @@ async fn main() -> std::io::Result<()> {
                 let (inbound, peer_addr) = accepted?;
                 if !ip_limiter.allow(peer_addr.ip()) {
                     eprintln!("rejecting {peer_addr}: ip rate limit exceeded");
+                    metrics.inc_rejected(RejectReason::IpRateLimit);
                     continue;
                 }
                 let Some(permit) = limiter.try_acquire() else {
                     eprintln!("rejecting {peer_addr}: connection limit reached");
+                    metrics.inc_rejected(RejectReason::ConnectionLimit);
                     continue;
                 };
                 let lb = Arc::clone(&lb);
                 let backends = Arc::clone(&backends);
                 let pools = Arc::clone(&pools);
                 let sni_routes = Arc::clone(&sni_routes);
+                let metrics = Arc::clone(&metrics);
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(e) = handle_connection(
@@ -95,7 +111,8 @@ async fn main() -> std::io::Result<()> {
                         sni_routes,
                         SNI_PEEK_TIMEOUT,
                         FAILURE_THRESHOLD,
-                        MAX_CONNECTION_ATTEMPTS
+                        MAX_CONNECTION_ATTEMPTS,
+                        metrics,
                     ).await {
                         eprintln!("connection error ({peer_addr}): {e}");
                     }

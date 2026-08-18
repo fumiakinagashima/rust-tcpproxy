@@ -3,6 +3,7 @@ use crate::load_balancer::LoadBalancer;
 use crate::pool::Pool;
 use crate::proxy_protocol::v2_header;
 use crate::tls_sni::peek_sni;
+use crate::metrics::{Direction, Metrics};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,7 +23,9 @@ pub async fn handle_connection(
     sni_peek_timeout: Duration,
     failure_threshold: usize,
     max_connection_attempts: usize,
+    metrics: Arc<Metrics>,
 ) -> std::io::Result<()> {
+    let _active = metrics.track_connection();
     let sni_backend = peek_sni(&inbound, sni_peek_timeout)
         .await
         .and_then(|name| sni_routes.get(&name).copied());
@@ -52,6 +55,7 @@ pub async fn handle_connection(
                 Err(e) => {
                     if let Some(idx) = idx {
                         backends.record_failure(idx, failure_threshold);
+                        metrics.inc_backend_failure(idx);
                     }
                     if sni_backend.is_none() {
                         lb.release(backend_addr);
@@ -72,6 +76,8 @@ pub async fn handle_connection(
         }
         
         let (from_client, from_backend) = result?;
+        metrics.add_bytes(Direction::ClientToBackend, from_client);
+        metrics.add_bytes(Direction::BackendToClient, from_backend);
         println!(
             "{peer_addr} -> {backend_addr}: {from_client} bytes client->backend, {from_backend} bytes backend->client"
         );

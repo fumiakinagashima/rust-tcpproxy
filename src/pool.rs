@@ -29,7 +29,7 @@ impl Pool {
         self.idle.lock().unwrap().push_back(stream);
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.idle.lock().unwrap().len()
     }
 }
