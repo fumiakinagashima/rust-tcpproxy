@@ -130,6 +130,11 @@ async fn main() -> std::io::Result<()> {
                     }
                 });
             }
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(e) = result {
+                    eprintln!("task join error: {e}");
+                }
+            }
             _ = sigterm.recv() => {
                 println!("received SIGTERM, no longer accepting new connections");
                 break;
